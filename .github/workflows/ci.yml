@@ -15,6 +15,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  temporal-replay:
+    name: Temporal sandbox and replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Build fixture dependencies
+        run: >-
+          npm run build -w @space/contracts &&
+          npm run build -w @space/memory-graph &&
+          npm run build -w @space/runtime
+      # Independent of export provenance so fork PRs exercise replay as well.
+      # The ordinary worker/public suites also discover this test file.
+      - name: Replay every baseline and exercise real workflow scheduling
+        timeout-minutes: 3
+        run: npm test -w @space/worker -- tests/workflow-sandbox.test.ts
+
   public-quality:
     name: Sanitized public quality gates
     runs-on: ubuntu-latest
