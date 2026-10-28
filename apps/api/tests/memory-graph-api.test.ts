@@ -431,6 +431,13 @@ describe("Memory graph API", () => {
     expect(data.edges).toContainEqual(expect.objectContaining({ id: "edge:tag" }));
     expect(data.truncated).toBe(true);
     expect(data.totalMatchingNodes).toBe(2202);
+    const expanded = await app.inject({ method: "GET", url: "/api/admin/memory/graph/overview?limit=5000", headers: { cookie } });
+    expect(expanded.statusCode).toBe(200);
+    expect(expanded.json().data.nodes).toHaveLength(2202);
+    expect(expanded.json().data.truncated).toBe(false);
+    expect(expanded.headers.etag).not.toBe(response.headers.etag);
+    const invalid = await app.inject({ method: "GET", url: "/api/admin/memory/graph/overview?limit=50001", headers: { cookie } });
+    expect(invalid.statusCode).toBe(400);
     await app.close();
   });
 

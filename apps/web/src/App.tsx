@@ -1095,7 +1095,8 @@ export function App() {
   const [minimizeAllPending, setMinimizeAllPending] = useState(false);
   const [isAgentsDashboardOpen, setIsAgentsDashboardOpen] = useState(false);
   const [agentsDashboardSummary, setAgentsDashboardSummary] = useState<AgentDashboardSummary | null>(null);
-  const [isMemoryWorkspaceOpen, setIsMemoryWorkspaceOpen] = useState(false);
+  const demoMemoryBenchmark = runtime.kind === "demo" && new URLSearchParams(window.location.search).has("memoryGraphBench");
+  const [isMemoryWorkspaceOpen, setIsMemoryWorkspaceOpen] = useState(demoMemoryBenchmark);
   // Space Gateway as a full-screen page over the workspace, like the memory workspace (ADMIN).
   const [isSpaceGatewayOpen, setIsSpaceGatewayOpen] = useState(false);
   const [workspaceNavigationDetail, setWorkspaceNavigationDetail] = useState<string | null>(null);
@@ -7399,6 +7400,7 @@ export function App() {
             <LazyMemoryWorkspace
               shellMode={shellMode}
               activeRoomId={activeRoom?.id ?? null}
+              initialMode={demoMemoryBenchmark ? "atlas" : undefined}
               onClose={() => setIsMemoryWorkspaceOpen(false)}
             />
           </RecoverableSurface>

@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { AlertTriangle, Calendar as CalendarIcon, ClipboardCheck, Network, Search, X } from "../ui-theme/app-icons.js";
 import type { MemoryGraphNodeDetail } from "@space/contracts";
 import { api, type MemoryGraphOverviewResponse } from "../../api.js";
+import { getSpaceRuntimeKind } from "../../runtime/SpaceRuntime.js";
 import { MemoryGraphErrorBoundary } from "./MemoryGraphErrorBoundary.js";
 import { MemoryNodeDetail } from "./MemoryNodeDetail.js";
 import { createMemoryAtlas, type MemoryAtlasPosition } from "./memory-atlas.js";
@@ -23,7 +24,12 @@ export function MemoryWorkspace({ shellMode, onClose, initialMode = "calendar" }
   const [selectedMode, setWorkspaceMode] = useState<"atlas" | "calendar" | "review">(initialMode);
   // Mobile shows the Calendar list only: no graph canvas (ADR-006) and no review panels.
   const workspaceMode = shellMode === "mobile" ? "calendar" : selectedMode;
-  const [view3D, setView3D] = useState(false);
+  const [view3D, setView3D] = useState(() => getSpaceRuntimeKind() === "demo" && new URLSearchParams(window.location.search).has("memoryGraphBench"));
+  const demoRuntime = getSpaceRuntimeKind() === "demo";
+  const [demoNodeCount, setDemoNodeCount] = useState<2000 | 10000 | 50000>(() => {
+    const requested = new URLSearchParams(window.location.search).get("graphNodes");
+    return requested === "10000" ? 10000 : requested === "50000" ? 50000 : 2000;
+  });
   const [showTitles, setShowTitles] = useState(true);
   const [reset3D, setReset3D] = useState(0);
   const [queryDraft, setQueryDraft] = useState("");
@@ -74,13 +80,14 @@ export function MemoryWorkspace({ shellMode, onClose, initialMode = "calendar" }
     setLoading(true);
     setError(null);
     closeDetail();
+    if (demoRuntime && view3D) performance.mark("memoryGraphBenchmarkStart");
     // Search covers the entire archive; removing the month picker must not hide old memories.
-    void api.memoryGraphOverview({ q: query || undefined, month: "all", relationMode: "RELATIONS" })
+    void api.memoryGraphOverview({ q: query || undefined, month: "all", relationMode: "RELATIONS", ...(view3D ? { limit: demoRuntime ? demoNodeCount : 50000, ...(demoRuntime ? { demoNodeCount } : {}) } : {}) })
       .then(payload => { if (active) setGraph(payload); })
       .catch(caught => { if (active) setError(caught instanceof Error ? caught.message : "Memory could not be loaded."); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [workspaceMode, query, closeDetail]);
+  }, [workspaceMode, query, view3D, demoRuntime, demoNodeCount, closeDetail]);
 
   useEffect(() => () => { detailRequest.current++; }, []);
   const selectNode = useCallback((nodeId: string) => {
@@ -95,27 +102,57 @@ export function MemoryWorkspace({ shellMode, onClose, initialMode = "calendar" }
       .finally(() => { if (request === detailRequest.current) setDetailLoading(false); });
   }, []);
 
-  const atlas = useMemo(() => createMemoryAtlas(graph?.data.nodes ?? [], graph?.data.edges ?? [], false), [graph]);
-  const [layout, setLayout] = useState<{ atlas: typeof atlas; positions: Map<string, MemoryAtlasPosition>; depth: Map<string, MemoryPoint3D> } | null>(null);
+  const atlasElapsed = useRef(0);
+  const atlasStarted = useRef(0);
+  const layoutPostElapsed = useRef(0);
+  const layoutPostStarted = useRef(0);
+  const layoutReceiveElapsed = useRef(0);
+  const atlas = useMemo(() => {
+    const started = performance.now();
+    atlasStarted.current = started;
+    const result = createMemoryAtlas(graph?.data.nodes ?? [], graph?.data.edges ?? [], false);
+    atlasElapsed.current = performance.now() - started;
+    return result;
+  }, [graph]);
+  const [layout, setLayout] = useState<{ atlas: typeof atlas; positions: Map<string, MemoryAtlasPosition>; depth: Map<string, MemoryPoint3D>; complete: boolean } | null>(null);
   useEffect(() => {
     if (workspaceMode !== "atlas" || !atlas.nodes.length || typeof Worker === "undefined") return;
     const worker = new Worker(new URL("./memory-network-layout.worker.ts", import.meta.url), { type: "module" });
-    worker.onmessage = (event: MessageEvent<{ positions: Array<[string, { x: number; y: number }]>; depth: Array<[string, MemoryPoint3D]> }>) => {
-      const coordinates = new Map(event.data.positions);
-      setLayout({ atlas, depth: new Map(event.data.depth), positions: new Map([...atlas.positions].map(([id, position]) => [id, { ...position, ...coordinates.get(id) }])) });
-      worker.terminate();
+    const orderedIds = view3D ? atlas.nodes.map(node => node.id).sort((a, b) => a.localeCompare(b)) : [];
+    worker.onmessage = (event: MessageEvent<{ kind: "progress" | "complete"; packed?: Float32Array; positions?: Array<[string, { x: number; y: number }]>; depth?: Array<[string, MemoryPoint3D]> }>) => {
+      const started = performance.now();
+      if (event.data.packed) {
+        const packed = event.data.packed;
+        const depth = new Map(orderedIds.map((id, i) => [id, { x: packed[i * 3]!, y: packed[i * 3 + 1]!, z: packed[i * 3 + 2]! }]));
+        setLayout({ atlas, depth, positions: atlas.positions, complete: event.data.kind === "complete" });
+      } else {
+        const coordinates = new Map(event.data.positions ?? []);
+        setLayout({ atlas, depth: new Map(event.data.depth ?? []), positions: new Map([...atlas.positions].map(([id, position]) => [id, { ...position, ...coordinates.get(id) }])), complete: true });
+      }
+      if (event.data.kind === "complete") worker.terminate();
+      layoutReceiveElapsed.current = performance.now() - started;
     };
     worker.onerror = event => { setError(`Memory layout could not be calculated: ${event.message || "worker unavailable"}`); worker.terminate(); };
-    worker.postMessage({ nodes: atlas.nodes, edges: atlas.edges });
-    return () => worker.terminate();
-  }, [workspaceMode, atlas]);
-  const layoutPending = typeof Worker !== "undefined" && atlas.nodes.length > 0 && layout?.atlas !== atlas;
+    const postTimer = window.setTimeout(() => {
+      const started = performance.now();
+      layoutPostStarted.current = started;
+      worker.postMessage({ nodes: atlas.nodes, edges: atlas.edges, mode: view3D ? "3D" : "BOTH" });
+      layoutPostElapsed.current = performance.now() - started;
+    }, 0);
+    return () => { window.clearTimeout(postTimer); worker.terminate(); };
+  }, [workspaceMode, atlas, view3D]);
+  const layoutPending = typeof Worker !== "undefined" && atlas.nodes.length > 0 && (layout?.atlas !== atlas || !layout.complete);
   const atlasPositions = layout?.atlas === atlas ? layout.positions : atlas.positions;
   const summary = graph?.data.summary;
-  const memoryCount = atlas.nodes.filter(node => node.type === "MEMORY").length;
+  const counts = useMemo(() => ({
+    memories: atlas.nodes.filter(node => node.type === "MEMORY").length,
+    sources: atlas.nodes.filter(node => node.type === "SOURCE").length,
+    sourceLinks: atlas.edges.filter(edge => edge.type === "CONTAINS" || edge.type === "DERIVED_FROM").length,
+    rootVisible: atlas.nodes.some(node => node.type === "SOURCE" && isMemoryCoreLabel(node.label))
+  }), [atlas]);
   const displayGroups = useMemo(() => atlas.groups.filter(group => group.kind !== "tag" || group.count >= 10), [atlas.groups]);
   return (
-    <section id="memory-atlas" className="memory-workspace memory-atlas" aria-label="Memory workspace" data-shell-mode={shellMode} data-workspace-mode={workspaceMode} data-view-mode={view3D ? "3D" : "2D"} data-titles-visible={showTitles} data-atlas-layout="network" data-layout-ready={layout?.atlas === atlas} data-layout-root-x={atlasPositions.get(atlas.nodes.find(node => isMemoryCoreLabel(node.label))?.id ?? "")?.x} data-atlas-group-count={displayGroups.length} data-atlas-color-count={new Set(displayGroups.map(group => group.color)).size}>
+    <section id="memory-atlas" className="memory-workspace memory-atlas" aria-label="Memory workspace" data-shell-mode={shellMode} data-workspace-mode={workspaceMode} data-view-mode={view3D ? "3D" : "2D"} data-titles-visible={showTitles} data-atlas-layout="network" data-atlas-start={atlasStarted.current.toFixed(0)} data-atlas-ms={atlasElapsed.current.toFixed(2)} data-layout-post-start={layoutPostStarted.current.toFixed(0)} data-layout-post-ms={layoutPostElapsed.current.toFixed(2)} data-layout-receive-ms={layoutReceiveElapsed.current.toFixed(2)} data-layout-ready={layout?.atlas === atlas && layout.complete} data-layout-root-x={atlasPositions.get(atlas.nodes.find(node => isMemoryCoreLabel(node.label))?.id ?? "")?.x} data-atlas-group-count={displayGroups.length} data-atlas-color-count={new Set(displayGroups.map(group => group.color)).size}>
       <header className="memory-atlas-header memory-workspace-header">
         <div className="memory-atlas-brand">
           {workspaceMode === "calendar" ? <CalendarIcon aria-hidden="true" /> : workspaceMode === "review" ? <ClipboardCheck aria-hidden="true" /> : <Network aria-hidden="true" />}
@@ -160,6 +197,9 @@ export function MemoryWorkspace({ shellMode, onClose, initialMode = "calendar" }
             <div className="memory-atlas-view-controls" aria-label="Memory view controls">
               <button type="button" aria-label="Toggle 3D memory view" aria-pressed={view3D} onClick={() => setView3D(value => !value)}><span aria-hidden="true">◇</span> {view3D ? "2D" : "3D"}</button>
               <button type="button" aria-label="Toggle memory titles" aria-pressed={showTitles} onClick={() => setShowTitles(value => !value)}>Aa <span>Titles</span></button>
+              {demoRuntime && view3D ? <select aria-label="Synthetic graph size" value={demoNodeCount} onChange={event => setDemoNodeCount(Number(event.currentTarget.value) as 2000 | 10000 | 50000)}>
+                <option value={2000}>2,000 nodes</option><option value={10000}>10,000 nodes</option><option value={50000}>50,000 nodes</option>
+              </select> : null}
               {view3D ? <button type="button" aria-label="Reset 3D memory view" onClick={() => setReset3D(value => value + 1)}>↺</button> : null}
             </div>
           ) : null}
@@ -183,16 +223,16 @@ export function MemoryWorkspace({ shellMode, onClose, initialMode = "calendar" }
               <p>Your files, memories and<br />their real connections.</p>
               <dl className="memory-atlas-stats">
                 <div><dt>Memories</dt><dd>{summary?.recordCount.toLocaleString() ?? "—"}</dd></div>
-                <div><dt>In this map</dt><dd>{memoryCount.toLocaleString()}</dd></div>
+                <div><dt>In this map</dt><dd>{counts.memories.toLocaleString()}</dd></div>
                 <div><dt>Connections</dt><dd>{atlas.edges.length.toLocaleString()}</dd></div>
               </dl>
             </div>
-            <div className="memory-graph-layout" data-detail-open={Boolean(selectedNodeId)} data-graph-mode="ATLAS" data-source-count={atlas.nodes.filter(node => node.type === "SOURCE").length} data-source-link-count={atlas.edges.filter(edge => edge.type === "CONTAINS" || edge.type === "DERIVED_FROM").length} data-root-visible={atlas.nodes.some(node => node.type === "SOURCE" && isMemoryCoreLabel(node.label))} data-raw-node-count={graph?.data.nodes.length ?? 0} data-visible-node-count={atlas.nodes.length} data-visible-edge-count={atlas.edges.length}>
-              <div className="memory-atlas-2d" hidden={view3D}><MemoryGraphErrorBoundary>
+            <div className="memory-graph-layout" data-detail-open={Boolean(selectedNodeId)} data-graph-mode="ATLAS" data-source-count={counts.sources} data-source-link-count={counts.sourceLinks} data-root-visible={counts.rootVisible} data-raw-node-count={graph?.data.nodes.length ?? 0} data-visible-node-count={atlas.nodes.length} data-visible-edge-count={atlas.edges.length}>
+              {!view3D ? <div className="memory-atlas-2d"><MemoryGraphErrorBoundary>
                 <Suspense fallback={<div className="memory-graph-loading" role="status">Connecting your memories…</div>}>
                   <DesktopMemoryGraph nodes={atlas.nodes} edges={atlas.edges} displayMode="SEMANTIC" relationMode="RELATIONS" selectedNodeId={selectedNodeId} onSelectNode={selectNode} loading={loading || layoutPending} error={error} totalNodes={graph?.data.totalMatchingNodes ?? 0} totalEdges={graph?.data.totalMatchingEdges ?? 0} truncated={graph?.data.truncated ?? false} atlasPositions={atlasPositions} showTitles={showTitles} />
                 </Suspense>
-              </MemoryGraphErrorBoundary></div>
+              </MemoryGraphErrorBoundary></div> : null}
               {view3D ? <MemoryGraph3D nodes={atlas.nodes} edges={atlas.edges} positions={atlasPositions} coordinates={layout?.atlas === atlas ? layout.depth : new Map()} showTitles={showTitles} selectedNodeId={selectedNodeId} onSelectNode={selectNode} loading={loading || layoutPending} resetToken={reset3D} /> : null}
             </div>
             {!selectedNodeId && displayGroups.length > 0 ? <aside className="memory-atlas-topics" aria-label="Map topics">

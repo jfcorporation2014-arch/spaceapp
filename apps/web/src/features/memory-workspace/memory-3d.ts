@@ -14,7 +14,7 @@ const unit = (seed: string) => {
 };
 
 /** Independent XYZ force layout. No coordinates are inherited from the 2D map. */
-export function layoutMemoryNetwork3D(nodes: MemoryGraphNode[], edges: MemoryGraphEdge[]): Map<string, MemoryPoint3D> {
+export function createMemoryNetwork3DStepper(nodes: MemoryGraphNode[], edges: MemoryGraphEdge[]) {
   const ordered = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
   const index = new Map(ordered.map((node, i) => [node.id, i]));
   const root = ordered.findIndex(node => node.type === "SOURCE" && isMemoryCoreLabel(node.label));
@@ -41,25 +41,68 @@ export function layoutMemoryNetwork3D(nodes: MemoryGraphNode[], edges: MemoryGra
       y: parent.y + (unit(`${id}:dy`) - 0.5) * 70, z: parent.z + (unit(`${id}:dz`) - 0.5) * 70 };
   }
   const fx = new Float64Array(count), fy = new Float64Array(count), fz = new Float64Array(count);
+  let step = 0;
+  const advance = (iterations: number): boolean => {
+  const end = Math.min(180, step + iterations);
   // Bounded spatial-grid repulsion and link springs act equally on all three axes.
-  for (let step = 0; step < 180; step++) {
+  for (; step < end; step++) {
     fx.fill(0); fy.fill(0); fz.fill(0);
-    const grid = new Map<string, number[]>();
-    for (let i = 0; i < count; i++) {
-      const p = points[i]!, key = `${Math.floor(p.x / 32)},${Math.floor(p.y / 32)},${Math.floor(p.z / 32)}`;
-      if (!grid.has(key)) grid.set(key, []);
-      grid.get(key)!.push(i);
-    }
-    for (let i = 0; i < count; i++) {
-      const p = points[i]!, gx = Math.floor(p.x / 32), gy = Math.floor(p.y / 32), gz = Math.floor(p.z / 32);
-      for (let x = gx - 1; x <= gx + 1; x++) for (let y = gy - 1; y <= gy + 1; y++) for (let z = gz - 1; z <= gz + 1; z++) {
-        for (const j of grid.get(`${x},${y},${z}`) ?? []) {
-          if (j <= i) continue;
-          const q = points[j]!, dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
-          const distanceSquared = Math.max(1, dx * dx + dy * dy + dz * dz);
-          const strength = (ordered[i]!.type === "SOURCE" || ordered[j]!.type === "SOURCE" ? 28 : 12) / distanceSquared;
-          fx[i]! += dx * strength; fy[i]! += dy * strength; fz[i]! += dz * strength;
-          fx[j]! -= dx * strength; fy[j]! -= dy * strength; fz[j]! -= dz * strength;
+    if (count > 3000) {
+      // Large, dense graphs use each cell's center of mass. Pairwise repulsion
+      // would otherwise become quadratic when thousands share one cell.
+      type Cell = { sourceCount: number; memoryCount: number; sx: number; sy: number; sz: number; mx: number; my: number; mz: number };
+      const grid = new Map<number, Cell>();
+      const key = (x: number, y: number, z: number) => (x + 1024) * 4194304 + (y + 1024) * 2048 + z + 1024;
+      for (let i = 0; i < count; i++) {
+        const p = points[i]!, cellKey = key(Math.floor(p.x / 32), Math.floor(p.y / 32), Math.floor(p.z / 32));
+        let cell = grid.get(cellKey);
+        if (!cell) { cell = { sourceCount: 0, memoryCount: 0, sx: 0, sy: 0, sz: 0, mx: 0, my: 0, mz: 0 }; grid.set(cellKey, cell); }
+        if (ordered[i]!.type === "SOURCE") { cell.sourceCount++; cell.sx += p.x; cell.sy += p.y; cell.sz += p.z; }
+        else { cell.memoryCount++; cell.mx += p.x; cell.my += p.y; cell.mz += p.z; }
+      }
+      for (let i = 0; i < count; i++) {
+        const p = points[i]!, source = ordered[i]!.type === "SOURCE";
+        const gx = Math.floor(p.x / 32), gy = Math.floor(p.y / 32), gz = Math.floor(p.z / 32);
+        for (let x = gx - 1; x <= gx + 1; x++) for (let y = gy - 1; y <= gy + 1; y++) for (let z = gz - 1; z <= gz + 1; z++) {
+          const cell = grid.get(key(x, y, z));
+          if (!cell) continue;
+          const selfCell = x === gx && y === gy && z === gz;
+          const sources = cell.sourceCount - (selfCell && source ? 1 : 0);
+          if (sources > 0) {
+            const dx = p.x - (cell.sx - (selfCell && source ? p.x : 0)) / sources;
+            const dy = p.y - (cell.sy - (selfCell && source ? p.y : 0)) / sources;
+            const dz = p.z - (cell.sz - (selfCell && source ? p.z : 0)) / sources;
+            const strength = 28 * sources / Math.max(1, dx * dx + dy * dy + dz * dz);
+            fx[i]! += dx * strength; fy[i]! += dy * strength; fz[i]! += dz * strength;
+          }
+          const memories = cell.memoryCount - (selfCell && !source ? 1 : 0);
+          if (memories > 0) {
+            const dx = p.x - (cell.mx - (selfCell && !source ? p.x : 0)) / memories;
+            const dy = p.y - (cell.my - (selfCell && !source ? p.y : 0)) / memories;
+            const dz = p.z - (cell.mz - (selfCell && !source ? p.z : 0)) / memories;
+            const strength = (source ? 28 : 12) * memories / Math.max(1, dx * dx + dy * dy + dz * dz);
+            fx[i]! += dx * strength; fy[i]! += dy * strength; fz[i]! += dz * strength;
+          }
+        }
+      }
+    } else {
+      const grid = new Map<string, number[]>();
+      for (let i = 0; i < count; i++) {
+        const p = points[i]!, key = `${Math.floor(p.x / 32)},${Math.floor(p.y / 32)},${Math.floor(p.z / 32)}`;
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key)!.push(i);
+      }
+      for (let i = 0; i < count; i++) {
+        const p = points[i]!, gx = Math.floor(p.x / 32), gy = Math.floor(p.y / 32), gz = Math.floor(p.z / 32);
+        for (let x = gx - 1; x <= gx + 1; x++) for (let y = gy - 1; y <= gy + 1; y++) for (let z = gz - 1; z <= gz + 1; z++) {
+          for (const j of grid.get(`${x},${y},${z}`) ?? []) {
+            if (j <= i) continue;
+            const q = points[j]!, dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
+            const distanceSquared = Math.max(1, dx * dx + dy * dy + dz * dz);
+            const strength = (ordered[i]!.type === "SOURCE" || ordered[j]!.type === "SOURCE" ? 28 : 12) / distanceSquared;
+            fx[i]! += dx * strength; fy[i]! += dy * strength; fz[i]! += dz * strength;
+            fx[j]! -= dx * strength; fy[j]! -= dy * strength; fz[j]! -= dz * strength;
+          }
         }
       }
     }
@@ -79,7 +122,21 @@ export function layoutMemoryNetwork3D(nodes: MemoryGraphNode[], edges: MemoryGra
       p.x += dx * stepScale; p.y += dy * stepScale; p.z += dz * stepScale;
     }
   }
-  return new Map(ordered.map((node, i) => [node.id, points[i]!]));
+  return step === 180;
+  };
+  const snapshot = () => new Map(ordered.map((node, i) => [node.id, { ...points[i]! }]));
+  const packed = () => {
+    const result = new Float32Array(count * 3);
+    points.forEach((point, i) => result.set([point.x, point.y, point.z], i * 3));
+    return result;
+  };
+  return { advance, snapshot, packed };
+}
+
+export function layoutMemoryNetwork3D(nodes: MemoryGraphNode[], edges: MemoryGraphEdge[]): Map<string, MemoryPoint3D> {
+  const stepper = createMemoryNetwork3DStepper(nodes, edges);
+  stepper.advance(180);
+  return stepper.snapshot();
 }
 
 export function projectMemoryPoint(point: MemoryPoint3D, camera: MemoryCamera3D, scale: number, width: number, height: number) {

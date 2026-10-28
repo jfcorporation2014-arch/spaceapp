@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { layoutMemoryNetwork3D, memory3DVolumeRatio, projectMemoryPoint, DEFAULT_MEMORY_CAMERA } from "../src/features/memory-workspace/memory-3d.js";
+import { createMemoryNetwork3DStepper, layoutMemoryNetwork3D, memory3DVolumeRatio, projectMemoryPoint, DEFAULT_MEMORY_CAMERA } from "../src/features/memory-workspace/memory-3d.js";
+import { indexProjectedMemory, pickProjectedMemory, selectMemoryLabelCandidates } from "../src/features/memory-workspace/memory-3d-picking.js";
+import { syntheticMemoryGraph, syntheticMemoryGraphChunk } from "../src/demo/synthetic-memory-graph.js";
 import type { MemoryGraphNode, MemoryGraphEdge } from "@space/contracts";
 
 describe("3D memory projection", () => {
@@ -58,5 +60,43 @@ describe("3D memory projection", () => {
     const plane = Array.from({ length: 100 }, (_, i) => ({ x: i % 10, y: Math.floor(i / 10), z: i % 10 + Math.floor(i / 10) }));
     expect(memory3DVolumeRatio(plane)).toBeCloseTo(0);
     expect(layoutMemoryNetwork3D([], []).size).toBe(0);
+  });
+  it("streams deterministic intermediate positions and converges to the synchronous result", () => {
+    const { nodes, edges } = fixture();
+    const stepper = createMemoryNetwork3DStepper(nodes, edges);
+    const initial = stepper.snapshot();
+    expect(stepper.advance(30)).toBe(false);
+    expect(stepper.snapshot()).not.toEqual(initial);
+    for (let i = 0; i < 5; i++) stepper.advance(30);
+    expect(stepper.snapshot()).toEqual(layoutMemoryNetwork3D(nodes, edges));
+    expect(stepper.packed()).toHaveLength(nodes.length * 3);
+  });
+  it("picks the nearest overlapping node from nearby grid cells and bounds labels", () => {
+    const nodes: MemoryGraphNode[] = [
+      { id: "far", type: "MEMORY", label: "Far", sourcePath: null, recordId: null },
+      { id: "near", type: "MEMORY", label: "Near", sourcePath: null, recordId: null },
+      { id: "core", type: "SOURCE", label: "space.md", sourcePath: null, recordId: null }
+    ];
+    const coordinates = new Map([["far", { x: 0, y: 0, z: 10 }], ["near", { x: 0, y: 0, z: -10 }], ["core", { x: 15, y: 0, z: 0 }]]);
+    const camera = { yaw: 0, pitch: 0, zoom: 1 };
+    const index = indexProjectedMemory(nodes, coordinates, camera, 800, 600, null);
+    expect(pickProjectedMemory(nodes, index, 400, 300)).toBe("near");
+    expect(pickProjectedMemory(nodes, index, 10, 10)).toBeNull();
+    expect(selectMemoryLabelCandidates(nodes, index, null, 1)).toEqual([2]);
+    const many = Array.from({ length: 500 }, (_, i): MemoryGraphNode => ({ id: `memory:${i}`, type: "MEMORY", label: `Memory ${i}`, sourcePath: null, recordId: null }));
+    const manyCoordinates = new Map(many.map((node, i) => [node.id, { x: i % 40, y: Math.floor(i / 40), z: 0 }]));
+    const manyIndex = indexProjectedMemory(many, manyCoordinates, camera, 800, 600, null);
+    expect(selectMemoryLabelCandidates(many, manyIndex, null, 2)).toHaveLength(120);
+  });
+  it("generates exact deterministic 2k, 10k and 50k public demo graphs", () => {
+    for (const size of [2000, 10000, 50000] as const) {
+      const { nodes, edges } = syntheticMemoryGraph(size);
+      expect(nodes).toHaveLength(size);
+      expect(edges).toHaveLength((size - 1) * 3);
+      expect(new Set(nodes.map(node => node.id)).size).toBe(size);
+      const ids = new Set(nodes.map(node => node.id));
+      expect(edges.every(edge => ids.has(edge.source) && ids.has(edge.target))).toBe(true);
+      expect(syntheticMemoryGraphChunk(size, size - 2000, size).nodes.at(-1)).toEqual(nodes.at(-1));
+    }
   });
 });

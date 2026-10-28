@@ -3222,6 +3222,8 @@ export const api = {
     return request<MemoryGraphResponse>(`/api/admin/memory/graph${suffix ? `?${suffix}` : ""}`);
   },
   memoryGraphOverview: (query: {
+    limit?: number;
+    demoNodeCount?: 2000 | 10000 | 50000;
     q?: string;
     nodeType?: MemoryGraphNodeType;
     scope?: MemoryEntry["scope"];
@@ -3232,6 +3234,7 @@ export const api = {
     relationMode?: "CLUSTERED" | "RELATIONS";
   } = {}) => {
     const params = new URLSearchParams();
+    if (query.limit) params.set("limit", String(query.limit));
     if (query.q) params.set("q", query.q);
     if (query.nodeType) params.set("nodeType", query.nodeType);
     if (query.scope) params.set("scope", query.scope);

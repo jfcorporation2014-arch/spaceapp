@@ -52,6 +52,7 @@ import type { SpaceApiClient } from "../runtime/SpaceRuntime.js";
 import { DEMO_LOCAL_REPLY, SpaceApiError } from "../runtime/SpaceRuntime.js";
 import { CLI_RUNTIME_PRESENTATIONS, cliRuntimeLabel } from "../cli-runtime-presentation.js";
 import { createDemoFixture, DEMO_FIXED_AT, type DemoFixture } from "./demo-fixture.js";
+import { syntheticMemoryGraph, type SyntheticGraphSize } from "./synthetic-memory-graph.js";
 import { MockServices } from "./mock-services.js";
 import { getCliMockTranscript, getCliMockModel, getCliMockCwd, getCliMockDefinition } from "./mock-cli-transcripts.js";
 
@@ -138,6 +139,8 @@ function initialStreamingBotStatus(): StreamingBotStatus {
 }
 
 type DemoMemoryGraphQuery = {
+  limit?: number;
+  demoNodeCount?: SyntheticGraphSize;
   q?: string;
   nodeType?: MemoryGraphNode["type"];
   scope?: "SYSTEM" | "PROJECT" | "ROOM";
@@ -1513,8 +1516,27 @@ export class DemoStore {
         });
       }
       case "memoryGraphOverview": {
-        const graph = this.memoryGraph((args[0] ?? {}) as DemoMemoryGraphQuery);
-        return Promise.resolve({ data: { ...graph, totalMatchingNodes: graph.nodes.length, totalMatchingEdges: graph.edges.length, truncated: false } });
+        const query = (args[0] ?? {}) as DemoMemoryGraphQuery;
+        const graph = this.memoryGraph(query);
+        if (!query.demoNodeCount) return Promise.resolve({ data: { ...graph, totalMatchingNodes: graph.nodes.length, totalMatchingEdges: graph.edges.length, truncated: false } });
+        const size = query.demoNodeCount;
+        const finish = (synthetic: ReturnType<typeof syntheticMemoryGraph>) => ({ data: {
+          ...graph, nodes: synthetic.nodes, edges: synthetic.edges,
+          summary: { sourceCount: 1, recordCount: synthetic.nodes.length - 1, nodeCount: synthetic.nodes.length, edgeCount: synthetic.edges.length, issueCount: 0 },
+          totalMatchingNodes: synthetic.nodes.length, totalMatchingEdges: synthetic.edges.length, truncated: false
+        } });
+        if (typeof Worker === "undefined") return Promise.resolve(finish(syntheticMemoryGraph(size)));
+        return new Promise((resolve, reject) => {
+          const worker = new Worker(new URL("./synthetic-memory-graph.worker.ts", import.meta.url), { type: "module" });
+          const nodes: MemoryGraphNode[] = [], edges: MemoryGraphPayload["edges"] = [];
+          worker.onmessage = (event: MessageEvent<{ nodes: MemoryGraphNode[]; edges: MemoryGraphPayload["edges"]; complete: boolean }>) => {
+            nodes.push(...event.data.nodes);
+            edges.push(...event.data.edges);
+            if (event.data.complete) { worker.terminate(); resolve(finish({ nodes, edges })); }
+          };
+          worker.onerror = event => { worker.terminate(); reject(new Error(event.message || "Synthetic graph generation failed")); };
+          worker.postMessage({ size });
+        });
       }
       case "memoryCalendar": {
         const query = (args[0] ?? {}) as { year?: number; month?: string; date?: string };
@@ -1592,6 +1614,12 @@ export class DemoStore {
       case "memoryConsolidation": return Promise.resolve(structuredClone(this.fixture.memoryWorkspace.maintenanceDetail));
       case "memoryGraphNode": {
         const detail = this.fixture.memoryWorkspace.nodeDetails[roomId ?? ""];
+        if (!detail && typeof roomId === "string" && (roomId === "source:synthetic-core" || /^memory:synthetic-\d+$/.test(roomId))) {
+          const source = roomId === "source:synthetic-core";
+          const label = source ? "space.md" : `Synthetic memory ${roomId.slice("memory:synthetic-".length)}`;
+          const record = source ? null : { ...this.fixture.memoryWorkspace.nodeDetails["memory:demo-public-launch"]!.record!, id: roomId, sourcePath: "/demo/synthetic/space.md", title: label, body: `## ${label}\nGenerated locally for graph performance testing.`, roomId: null, scope: "SYSTEM" as const, tags: [], topics: [] };
+          return Promise.resolve({ node: { id: roomId, type: source ? "SOURCE" : "MEMORY", label, sourcePath: "/demo/synthetic/space.md", recordId: source ? null : roomId }, record, relatedNodes: [], relatedEdges: [], issues: [] });
+        }
         if (!detail) throw new SpaceApiError("Memory node not found.", { status: 404, code: "NOT_FOUND" });
         return Promise.resolve(structuredClone(detail));
       }
