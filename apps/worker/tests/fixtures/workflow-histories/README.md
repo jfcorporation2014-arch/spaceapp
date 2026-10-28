@@ -20,9 +20,14 @@ npm run temporal:record-histories -- reviewed-patch-v2
 The first run downloads the SDK-compatible Temporal test server. Subsequent
 runs reuse its cache. No Docker, database, provider or operator credentials are
 used. The server and workers are stopped after the suite, including failures.
-The public CI has an independent Ubuntu replay job, including fork PRs, with
-a three-minute limit on the sandbox/replay step. Fixture dependencies are built
-before that step. The ordinary worker and public suites also run these tests.
+The committed baselines cover all eight workflow types, continuation runs,
+the pre-patch supervisor branch and prepared work. The 250-poll and
+300-iteration boundaries run as live sandbox tests but are not committed as
+replay histories, keeping each version reviewable. Each JSON event occupies one
+line. The public CI has an independent Ubuntu replay job, including fork PRs,
+with a three-minute limit on the sandbox/replay step. Fixture dependencies are
+built before that step. The ordinary worker and public suites also run these
+tests.
 
 **Recording is an explicit migration operation.** After the initial baseline,
 add a new version only together with a reviewed, replay-safe `patched()` change.

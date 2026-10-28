@@ -27,6 +27,18 @@ const activityNames = [
   "createScheduledMemoryAudit", "prepareMemoryConsolidation", "finalizeMemoryRepair", "executePersistedMemoryChangeSet"
 ];
 export const historyRoot = fileURLToPath(new URL("../fixtures/workflow-histories/", import.meta.url));
+// Preserve one replay baseline per workflow plus continuation and pre-patch branches.
+// The 250-poll and 300-iteration cases remain live sandbox tests; recording every
+// event from those runs would make each patch version too large to review.
+const baselineHistoryNames = new Set([
+  "dummy-retry--0.json", "turn-retry--0.json", "goal-timeout--0.json",
+  "goal-continued--0.json", "goal-continued--1.json",
+  "supervisor-main-50--0.json", "supervisor-main-50--1.json",
+  "supervisor-legacy-50--0.json", "supervisor-legacy-50--1.json",
+  "supervisor-prepared-carried--0.json", "supervisor-prepared-carried--1.json",
+  "action-failure--0.json", "memory-mutation--0.json",
+  "memory-consolidation-repair--0.json", "memory-maintenance--0.json"
+]);
 
 export function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -74,10 +86,8 @@ export class WorkflowSandbox {
     this.env = await TestWorkflowEnvironment.createTimeSkipping({ client: { identity: "space-synthetic-tests" } });
     try {
       for (const key of Object.keys(source) as Bundle[]) this.bundles.set(key, await this.bundle(key));
-      // Replay the committed baseline before either exercising or recording new code.
       const existing = await fixtureFiles();
-      if (existing.length) await this.replay(existing);
-      else if (!process.env.SPACE_TEMPORAL_RECORD_DIR) throw new Error("Missing committed Temporal histories; see fixtures/workflow-histories/README.md");
+      if (!existing.length && !process.env.SPACE_TEMPORAL_RECORD_DIR) throw new Error("Missing committed Temporal histories; see fixtures/workflow-histories/README.md");
       const activities = Object.fromEntries(activityNames.map((name) => [name, async (...args: any[]) => {
         const implementation = this.activities[name];
         if (!implementation) throw new Error(`Unexpected test activity: ${name}`);
@@ -174,13 +184,14 @@ export class WorkflowSandbox {
     if (!directory) return;
     await mkdir(directory, { recursive: true });
     for (const [name, history] of this.snapshots) {
+      if (!baselineHistoryNames.has(name)) continue;
       // Host identities and exception source paths have no role in determinism.
       const object = temporal.api.history.v1.History.toObject(temporal.api.history.v1.History.fromObject(history), {
         longs: String, enums: String, bytes: String
       });
       const portable = JSON.parse(JSON.stringify(object), (key, value) =>
         key === "identity" ? "space-synthetic-tests" : key === "stackTrace" ? "Synthetic test failure" : value);
-      await writeFile(join(directory, name), `${JSON.stringify(portable, null, 2)}\n`, { flag: "wx" });
+      await writeFile(join(directory, name), formatHistory(portable), { flag: "wx" });
     }
     await this.replay(await fixtureFiles(directory));
   }
@@ -196,4 +207,13 @@ export class WorkflowSandbox {
       for (const result of results) if (result.status === "rejected") throw result.reason;
     } finally { if (this.env) await this.env.teardown(); }
   }
+}
+
+export function formatHistory(history: Record<string, unknown>): string {
+  const fields = Object.entries(history).map(([key, value]) => {
+    if (key !== "events" || !Array.isArray(value)) return `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`;
+    const lines = value.map(event => `    ${JSON.stringify(event)}`).join(",\n");
+    return `  "events": [\n${lines}\n  ]`;
+  });
+  return `{\n${fields.join(",\n")}\n}\n`;
 }

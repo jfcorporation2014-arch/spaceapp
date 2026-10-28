@@ -7,7 +7,7 @@ import { DOT_GOAL_SIGNAL, ROOM_AGENT_ENQUEUE_SIGNAL, ROOM_AGENT_STOP_SIGNAL, roo
   roomAgentSupervisorQueueItemSchema } from "@space/contracts";
 import { continuationFixture } from "./room-continuation-fixture.js";
 import { discardSupervisorTurn, finishSupervisorTurn, prepareBackgroundContinuation, supervisorTurnState } from "../src/room-background-continuation.js";
-import { WorkflowSandbox, deferred, inputFromHistory, until } from "./support/workflow-sandbox.js";
+import { WorkflowSandbox, deferred, fixtureFiles, inputFromHistory, until } from "./support/workflow-sandbox.js";
 
 const sandbox = new WorkflowSandbox();
 vi.setConfig({ testTimeout: 45_000, hookTimeout: 90_000 });
@@ -62,6 +62,12 @@ describe.sequential("real Temporal sandbox and immutable replay gate", () => {
   beforeAll(() => sandbox.open(), 90_000);
   beforeEach(() => { activities = defaults(); sandbox.activities = activities; });
   afterAll(async () => { try { await sandbox.writeRecording(); } finally { await sandbox.close(); } }, 90_000);
+
+  it("replays each committed workflow history against the production bundles", async () => {
+    const files = await fixtureFiles();
+    expect(files.length).toBeGreaterThan(0);
+    await sandbox.replay(files);
+  }, 45_000);
 
   it("runs the dummy turn in order and retries an activity failure", async () => {
     const order: string[] = [];
